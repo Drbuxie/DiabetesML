@@ -1,0 +1,316 @@
+---
+title: "Machine Learning Project"
+author: "Chukwuebuka Ogwo, Journey Penney, and Daren Kuwaye"
+date: "4/20/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Setup
+```{r packages}
+# install.packages("MachineShop")
+# install.packages("recipes")
+# install.packages("doParallel")
+# install.packages("ggplot2")
+# install.packages("gbm")
+
+
+library(MASS)
+suppressPackageStartupMessages(library(MachineShop))
+suppressPackageStartupMessages(library(doParallel))
+suppressPackageStartupMessages(library(recipes))
+library(ggplot2)
+```
+
+
+```{r control}
+## Allocate cores for parallel processing
+registerDoParallel(cores = 6)
+## Data
+pd <- rbind(Pima.te, Pima.tr)
+## Recipe
+recipe <- recipe(type ~ ., data = pd) %>%
+  step_scale(all_numeric()) %>%
+  role_case(stratum = type)
+## Resampling Control
+cvc <- CVControl(folds = 5, repeats = 1, seed = 808)
+```
+
+## Summary Statistics
+```{r summary_stats}
+if(file.exists("SummaryStats.RData")){
+  load("SummaryStats.RData")
+} else{
+  mm <- apply(pd[, -8], 2, mean)
+  ss <- apply(pd[, -8], 2, sd)
+  
+  yes <- pd[, 8] == "Yes"
+  pd_y <- pd[yes, ]
+  pd_n <- pd[!yes, ]
+  
+  mm_y <- apply(pd_y[, -8], 2, mean)
+  ss_y <- apply(pd_y[, -8], 2, sd)
+  mm_n <- apply(pd_n[, -8], 2, mean)
+  ss_n <- apply(pd_n[, -8], 2, sd)
+  
+  sum_stats1 <- data.frame(
+    mean_yes = mm_y,
+    sd_yes = ss_y, 
+    mean_no = mm_n,
+    sd_no = ss_n, 
+    mean_total = mm, 
+    sd_total = ss
+    )
+  sum_stats2 <- data.frame(
+    yes = sum(yes),
+    no = nrow(pd) - sum(yes)
+    )
+  row.names(sum_stats2) <- "type"
+  
+  save(list = c("sum_stats1", "sum_stats2"),
+       file = "SummaryStats.RData")
+}
+colnames(pd)
+str(pd)
+sum_stats1
+sum_stats2
+```
+
+
+## Model Fitting
+```{r fitting}
+if(file.exists("AllModels.RData")){
+  load("AllModels.RData")
+}else{
+  ### GBM ###
+  GBM_fit <- fit(recipe, model = 
+                   TunedModel(GBMModel, control = cvc))
+  GBM_res <- resample(recipe, model = TunedModel(GBMModel),
+                      control = cvc)
+  gbm <- list(
+    fit = GBM_fit,
+    ml = as.MLModel(GBM_fit),
+    resample = GBM_res,
+    vi = varimp(GBM_fit),
+    dep = dependence(GBM_fit),
+    conf = confusion(GBM_res),
+    cali_bin = calibration(GBM_res),
+    cali_smooth = calibration(GBM_res, breaks = NULL)
+    )
+  
+  ### SVM ###
+  svm_fit <- fit(recipe, model = TunedModel(
+    SVMRadialModel,  grid = 3, control = cvc))
+  svm_res <- resample(recipe, 
+                      model = TunedModel(SVMRadialModel, grid = 3),
+                      control = cvc)
+  svm <- list(
+    fit = svm_fit,
+    ml = as.MLModel(svm_fit),
+    resample = svm_res,
+    vi = NULL,  ## not defined for SVM
+    dep = dependence(svm_fit),
+    conf = confusion(svm_res),
+    cali_bin = calibration(svm_res),
+    cali_smooth = calibration(svm_res, breaks = NULL)
+  )
+  
+  ### GLM with Probit link ###
+  pro_fit <- fit(recipe, model = GLMModel(
+    family = binomial(link = "probit")))
+  pro_res <- resample(recipe, model = GLMModel(
+    family = binomial(link = "probit")), control = cvc)
+  pro <- list(
+    fit = pro_fit,
+    ml = as.MLModel(pro_fit),
+    resample = pro_res,
+    vi = varimp(pro_fit),
+    dep = dependence(pro_fit),
+    conf = confusion(pro_res),
+    cali_bin = calibration(pro_res),
+    cali_smooth = calibration(pro_res, breaks = NULL)
+  )
+
+  ### GLM with Logit link ###
+  log_fit <- fit(recipe, model = GLMModel(
+    family = binomial(link = "logit")))
+  log_res <- resample(recipe, model = GLMModel(
+    family = binomial(link = "logit")), control = cvc)
+  log <- list(
+    fit = log_fit,
+    ml = as.MLModel(log_fit),
+    resample = log_res,
+    vi = varimp(log_fit),
+    dep = dependence(log_fit),
+    conf = confusion(log_res),
+    cali_bin = calibration(log_res),
+    cali_smooth = calibration(log_res, breaks = NULL)
+  )
+  
+  ### All ###
+  all_select <- SelectedModel(
+    gbm = TunedModel(GBMModel),
+    svm = TunedModel(SVMRadialModel, grid = 3),
+    pro = GLMModel(family = binomial(link = "probit")),
+    log = GLMModel(family = binomial(link = "logit")),
+    control = cvc
+  )
+  all_fit <- fit(recipe, model = all_select)
+  all_res <- resample(recipe, model = all_select, control = cvc)
+  all <- list(
+    fit = all_fit,
+    ml = as.MLModel(all_fit),
+    resample = all_res,
+    vi = varimp(all_fit),
+    dep = dependence(all_fit),
+    conf = confusion(all_res),
+    cali_bin = calibration(all_res),
+    cali_smooth = calibration(all_res, breaks = NULL)
+  )
+  
+  save(list = c("log", "pro", "svm", "gbm", "all"),
+       file = "AllModels.RData")
+}
+```
+
+## Results
+### GBM
+```{r results_gbm,echo=1}
+plot(gbm$dep)
+# Var_GB <- varimp(GBM_fit)
+# Dep_GBM <- dependence(GBM_fit)
+# cali_GBM <- calibration(GBM_res)
+# summary(GBM_fit)
+# summary(GBM_res)
+# plot(GBM_res)
+# print(Var_GB, n = Inf)
+# plot(Var_GB)
+# plot(Dep_GBM)
+# confusion(GBM_res)
+# plot(cali_GBM, se = TRUE)
+```
+
+### SVM
+```{r results_svm,echo=FALSE}
+# summary(svm_res)
+# ## Values of selected tuning parameters
+# svm_fit@param
+# svm_fit@kernelf
+# ## Tuning parameter plot
+# svm_tuned <- as.MLModel(svm_fit)
+# svm_tuned
+# plot(svm_tuned, type = "l")
+# ## Partial Dependence
+# svm_dep <- dependence(svm_fit)
+# plot(svm_dep)
+# ## Calibration Plots
+# svm_cal_bin <- calibration(svm_res)
+# plot(svm_cal_bin, se = TRUE)
+# svm_cal_smooth <- calibration(svm_res, breaks = NULL)
+# plot(svm_cal_smooth, se = TRUE)
+# ## Confusion matrix
+# svm_conf <- confusion(svm_res)
+# svm_conf
+# plot(svm_conf)
+```
+
+### Logistic Regression
+```{r results_logit}
+logit <- function(x){
+  log(x/(1-x))
+}
+
+for(j in 1:7){
+  plot(y = pd[, j], x = logit(predict(log$fit, type = "prob")), type = "p",
+       main = colnames(pd)[j])
+}
+```
+
+### Logit Regression
+```{r results_logit2}
+emplogit = function(x, y, binsize = NULL, ci = FALSE, probit = FALSE,
+                    prob = FALSE, main = NULL, xlab = "", ylab = ""){
+  # x         vector with values of the independent variable
+  # y         vector of binary responses
+  # binsize   integer value specifying bin size (optional)
+  # ci        logical value indicating whether to plot approximate
+  #           confidence intervals (not supported as of 02/08/2015)
+  # probit    logical value indicating whether to plot probits instead
+  #           of logits
+  # prob      logical value indicating whether to plot probabilities
+  #           without transforming
+  #
+  # the rest are the familiar plotting options
+
+  if (length(x) != length(y))
+    stop("x and y lengths differ")
+  if (any(y < 0 | y > 1))
+    stop("y not between 0 and 1")
+  if (length(x) < 100 & is.null(binsize))
+    stop("Less than 100 observations: specify binsize manually")
+
+  if (is.null(binsize)) binsize = min(round(length(x)/10), 50)
+
+  if (probit){
+    link = qnorm
+    if (is.null(main)) main = "Empirical probits"
+  } else {
+    link = function(x) log(x/(1-x))
+    if (is.null(main)) main = "Empirical logits"
+  }
+
+  sort = order(x)
+  x = x[sort]
+  y = y[sort]
+  a = seq(1, length(x), by=binsize)
+  b = c(a[-1] - 1, length(x))
+
+  prob = xmean = ns = rep(0, length(a)) # ns is for CIs
+  for (i in 1:length(a)){
+    range = (a[i]):(b[i])
+    prob[i] = mean(y[range])
+    xmean[i] = mean(x[range])
+    ns[i] = b[i] - a[i] + 1 # for CI 
+  }
+
+  extreme = (prob == 1 | prob == 0)
+  prob[prob == 0] = min(prob[!extreme])
+  prob[prob == 1] = max(prob[!extreme])
+
+  g = link(prob) # logits (or probits if probit == TRUE)
+
+  linear.fit = lm(g[!extreme] ~ xmean[!extreme])
+  b0 = linear.fit$coef[1]
+  b1 = linear.fit$coef[2]
+
+  loess.fit = loess(g[!extreme] ~ xmean[!extreme])
+
+    plot(xmean, g, main=main, xlab=xlab, ylab=ylab)
+    abline(b0,b1)
+    lines(loess.fit$x, loess.fit$fitted, lwd=2, lty=2)
+}
+emplogit(x = pd$npreg, y = (as.integer(pd$type) - 1))
+for(j in 1:7){
+  emplogit(x = pd[, j], y = (as.integer(pd$type) - 1))
+}
+```
+
+### All Models Version 1
+```{r results_all1}
+result <- c(log = log$resample, pro = pro$resample, svm = svm$resample, gbm = gbm$resample)
+summary(result)
+```
+
+
+### All Models Version 2
+```{r results_all}
+summary(all$res)
+print(all$ml)
+```
+
+<!-- looks like logistic regression was chosen with Brier score.  But the partial dependence plots from gbm do not support linearlity. -->
+
+
